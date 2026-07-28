@@ -95,6 +95,29 @@ Nội dung nên có trong `REACT_SYSTEM_PROMPT`: *"Bạn là trợ lý khám ph�
 
 ---
 
+## 🔀 HYBRID ROUTER (Role 4 đã hoàn thành)
+
+`src/app.py` giờ có hàm `route_query()` phân luồng 3 tầng, **rẻ trước — đắt sau**.
+Sơ đồ đầy đủ ở [hybrid_flowchart.mermaid](hybrid_flowchart.mermaid).
+
+| Tầng | Cơ chế | Chi phí | Quyết định gì |
+| :--- | :--- | :--- | :--- |
+| 1 | Luật an toàn (từ khóa tự hại) | 0 token | ➔ `safety_guardrail` |
+| 2 | Luật xác định: dữ liệu cấu trúc → khái niệm → từ khóa nghiệp vụ | 0 token | ➔ `react_agent` / `chatbot` |
+| 3 | LLM classifier (chỉ khi Tầng 2 bó tay) | 1 call ngắn | ➔ `react_agent` / `chatbot` |
+
+**Kết quả đo trên bộ test của Role 1: 5/5 câu định tuyến đúng, không tốn call nào**
+(cả 5 câu đều dừng ở Tầng 1–2). App tự in bảng chấm này mỗi lần chạy.
+
+Thứ tự trong Tầng 2 là cố ý: **câu hỏi khái niệm được xét TRƯỚC từ khóa nghiệp vụ.**
+Nhờ vậy câu *"Khái niệm nhân cách thứ hai nên hiểu như thế nào?"* đi đường Chatbot
+(dù có chứa cụm "nhân cách thứ hai") thay vì gọi tool một cách lãng phí.
+
+Muốn chỉnh độ nhạy của router, sửa 2 danh sách `CHATBOT_SIGNALS` / `AGENT_SIGNALS`
+ở đầu `src/app.py` — đã đánh dấu sẵn comment.
+
+---
+
 ## 📊 ROLE 5 — `docs/trace_eval.md`
 
 Mỗi lần chạy `python src/app.py`, app tự xuất file trace vào thư mục `logs/`
@@ -106,8 +129,9 @@ Nhớ phân loại từng output: **correct** / **safe fallback** / **hallucinat
 ## ✅ LỆNH CHẠY
 
 ```bash
-python src/app.py                # chạy toàn bộ test case, cả chatbot lẫn agent
+source .venv/bin/activate        # BẮT BUỘC: python3 mặc định của máy thiếu thư viện
+python src/app.py                # 🔀 SẢN PHẨM HOÀN CHỈNH: Router tự phân luồng + bảng chấm
+python src/app.py --mode both    # chạy song song 2 nhánh để LẤY SỐ LIỆU SO SÁNH cho báo cáo
 python src/app.py --case 3       # chạy riêng 1 test case
-python src/app.py --mode agent   # chỉ chạy ReAct Agent
 python src/app.py --chat         # hội thoại trực tiếp — dùng khi bị nhóm bạn cross-audit
 ```
