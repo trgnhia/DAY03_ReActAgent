@@ -108,7 +108,7 @@ export default function Home() {
 
   return <main className="grain min-h-screen overflow-hidden">
     <nav className="mx-auto flex max-w-7xl items-center justify-between px-5 py-5 sm:px-8">
-      <button onClick={() => setScreen("home")} className="focus-ring rounded-xl" aria-label="Về trang chủ"><img src="public/vinuni-demo-mark.svg" alt="VinUni Inner Compass" className="h-12 w-auto" /></button>
+      <button onClick={() => setScreen("home")} className="focus-ring rounded-xl" aria-label="Về trang chủ"><img src="/Trường_Đại_học_VinUni_logo.png" alt="VinUniversity" className="h-12 w-auto" /></button>
       <div className="flex items-center gap-2"><span className="hidden rounded-full bg-white/70 px-3 py-2 text-xs font-semibold text-slate-500 sm:inline">PHIÊN TỰ PHẢN TƯ</span><button onClick={clearData} className="focus-ring rounded-full border border-slate-200 bg-white/75 p-2.5 text-slate-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600" title="Xóa dữ liệu phiên"><Trash2 size={16} /></button></div>
     </nav>
     <AnimatePresence mode="wait">

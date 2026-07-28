@@ -24,4 +24,4 @@ uvicorn main:app --reload --port 8000
 
 The demo is a non-clinical self-reflection experience. It does not diagnose, treat, authenticate users, or persist data on the backend. Browser data is stored only after consent and can be deleted from the UI.
 
-The brand mark in `web/public/vinuni-demo-mark.svg` is kept local for the demo. Verify its usage rights and replace it with an approved official asset before public distribution.
+The brand mark in `web/public/Trường_Đại_học_VinUni_logo.png` is kept local for the demo. Verify its usage rights before public distribution.
