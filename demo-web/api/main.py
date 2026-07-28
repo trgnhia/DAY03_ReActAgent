@@ -8,8 +8,11 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# The lab's .env remains outside demo-web and is never copied or returned by this API.
+load_dotenv(os.path.join(ROOT, ".env"), override=False)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from app import CRISIS_RESPONSE, check_safety, run_react_agent  # noqa: E402
@@ -38,7 +41,15 @@ class ExerciseRequest(BaseModel):
 def public_trace(trace: list[Any]) -> list[str]:
     """Keep only observable trace lines; never serialize prompts or provider objects."""
     allowed = ("Thought:", "Action:", "Observation:", "Final Answer:", "Safe Fallback:", "[Parse Error]")
-    return [str(item) for item in trace if str(item).startswith(allowed)]
+    visible: list[str] = []
+    for item in trace:
+        # src/app.py stores the trace as a Markdown block. Extract only the
+        # observable lines and discard headings/fences/question text.
+        for line in str(item).splitlines():
+            line = line.strip()
+            if line.startswith(allowed):
+                visible.append(line)
+    return visible
 
 
 @app.get("/health")
