@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from typing import Any
@@ -39,6 +40,7 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=Fals
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     conversation: list[dict[str, str]] = Field(default_factory=list, max_length=20)
+    profileContext: dict[str, float] | None = None
 
 
 class ProfileRequest(BaseModel):
@@ -74,6 +76,34 @@ def text_chunks(text: str, size: int = 12):
         yield text[index : index + size]
 
 
+TRAIT_LABELS = {
+    "openness": "Cởi mở (Openness)",
+    "conscientiousness": "Tận tụy / Cầu toàn (Conscientiousness)",
+    "extraversion": "Hướng ngoại (Extraversion)",
+    "agreeableness": "Hòa đồng (Agreeableness)",
+    "emotional_sensitivity": "Độ nhạy cảm cảm xúc (Emotional Sensitivity)",
+}
+
+
+def profile_context_text(scores: dict[str, float] | None) -> str:
+    """Add browser-owned self-check data as explicit, non-clinical chat context."""
+    if not scores:
+        return ""
+    safe_scores = []
+    for key, label in TRAIT_LABELS.items():
+        value = scores.get(key)
+        if isinstance(value, (int, float)) and 1 <= float(value) <= 5:
+            safe_scores.append(f"- {label}: {float(value):.1f}/5.0")
+    if not safe_scores:
+        return ""
+    return (
+        "\nHồ sơ self-check của sinh viên trong phiên trình duyệt này (dữ liệu do người dùng cung cấp; "
+        "chỉ để tự phản tư, không phải chẩn đoán):\n"
+        + "\n".join(safe_scores)
+        + "\nHãy dùng bối cảnh này khi phù hợp, không khẳng định nó là sự thật tuyệt đối.\n"
+    )
+
+
 def stream_react(payload: ChatRequest):
     """Streaming presentation adapter; ReAct policy/parser/tools remain from src/app.py."""
     if check_safety(payload.message):
@@ -86,7 +116,7 @@ def stream_react(payload: ChatRequest):
         return
 
     provider = get_llm_provider()
-    transcript = f"Question: {payload.message}\n"
+    transcript = f"Question: {payload.message}\n" + profile_context_text(payload.profileContext)
     seen_actions: dict[tuple[str, tuple[str, ...]], int] = {}
     final_answer: str | None = None
     provider_failed = False
@@ -169,10 +199,30 @@ def profile(payload: ProfileRequest) -> dict[str, Any]:
     if any(not isinstance(item, int) or item < 1 or item > 5 for item in payload.responses):
         return {"error": "Mỗi câu trả lời phải là số nguyên từ 1 đến 5."}
     raw = score_personality_profile(payload.responses)
+    match = re.search(r"Kết quả điểm số hồ sơ tính cách:\s*(\{[^\n]+\})", raw)
+    if not match:
+        return {"error": raw}
+    scores = json.loads(match.group(1))
     archetype = get_psychological_archetype("sáng tạo, sâu sắc")
-    return {"profile": raw, "archetype": archetype, "disclaimer": "Kết quả chỉ để tự phản tư, không phải chẩn đoán."}
+    return {
+        "profile": raw,
+        "scores": scores,
+        "traits": [{"key": key, "label": label, "value": scores[key]} for key, label in TRAIT_LABELS.items()],
+        "archetype": archetype,
+        "disclaimer": "Kết quả chỉ để tự phản tư, không phải chẩn đoán.",
+    }
 
 
 @app.post("/api/exercise")
-def exercise(payload: ExerciseRequest) -> dict[str, str]:
-    return {"exercise": get_wellbeing_exercise(payload.emotionalState, payload.intensity), "disclaimer": "Gợi ý phổ thông, không thay thế chuyên gia."}
+def exercise(payload: ExerciseRequest) -> dict[str, Any]:
+    raw = get_wellbeing_exercise(payload.emotionalState, payload.intensity)
+    steps = [re.sub(r"^\d+\.\s*", "", line).strip() for line in raw.splitlines() if re.match(r"^\d+\.\s*", line)]
+    title = raw.splitlines()[0].replace("🧘", "").replace("🌿", "").replace("🌱", "").strip()
+    return {
+        "exercise": raw,
+        "title": title,
+        "state": payload.emotionalState,
+        "intensity": payload.intensity,
+        "steps": steps,
+        "disclaimer": "Gợi ý hỗ trợ phổ thông, không thay thế chuyên gia.",
+    }
