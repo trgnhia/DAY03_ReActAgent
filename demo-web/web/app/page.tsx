@@ -3,10 +3,10 @@
 import { AnimatePresence, motion } from "motion/react";
 import { ArrowRight, ChevronLeft, ChevronRight, HeartHandshake, LockKeyhole, MessageCircle, RotateCcw, Send, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getExercise, mockChat, mockExercise, mockProfile, scoreProfile, sendChat, type ChatResult, type ProfileResult } from "@/lib/api";
+import { getExercise, mockChat, mockExercise, mockProfile, scoreProfile, sendChatStream, type ProfileResult, type StreamEvent } from "@/lib/api";
 
 type Screen = "home" | "quiz" | "insight" | "chat";
-type Message = { role: "user" | "assistant"; content: string; trace?: string[] };
+type Message = { id: string; role: "user" | "assistant"; content: string; trace?: string[]; streaming?: boolean };
 type SessionSnapshot = { savedAt: number; messages: Message[]; answers: number[]; profile?: ProfileResult };
 const questions = [
   "Tôi thường tò mò về những ý tưởng và trải nghiệm mới.", "Tôi có thể kiên trì hoàn thành điều mình đã bắt đầu.",
@@ -27,7 +27,7 @@ export default function Home() {
   const [profile, setProfile] = useState<ProfileResult>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [messages, setMessages] = useState<Message[]>([{ role: "assistant", content: "Chào bạn, mình là Inner Compass. Bạn muốn bắt đầu từ một cảm xúc, một thói quen, hay điều đang khiến bạn tò mò về chính mình?" }]);
+  const [messages, setMessages] = useState<Message[]>([{ id: "welcome", role: "assistant", content: "Chào bạn, mình là Inner Compass. Bạn muốn bắt đầu từ một cảm xúc, một thói quen, hay điều đang khiến bạn tò mò về chính mình?" }]);
   const [draft, setDraft] = useState("");
   const [traceOpen, setTraceOpen] = useState(true);
   const [exercise, setExercise] = useState<{ exercise: string; disclaimer: string }>();
@@ -78,19 +78,37 @@ export default function Home() {
   }
   function clearData() {
     window.localStorage.removeItem("inner-compass-consent"); window.localStorage.removeItem("inner-compass-session");
-    setConsent(false); setAnswers(Array(10).fill(0)); setProfile(undefined); setExercise(undefined); setMessages([{ role: "assistant", content: "Dữ liệu phiên đã được xóa. Khi bạn sẵn sàng, chúng ta có thể bắt đầu lại." }]); setScreen("home");
+    setConsent(false); setAnswers(Array(10).fill(0)); setProfile(undefined); setExercise(undefined); setMessages([{ id: "cleared", role: "assistant", content: "Dữ liệu phiên đã được xóa. Khi bạn sẵn sàng, chúng ta có thể bắt đầu lại." }]); setScreen("home");
   }
   async function submitChat(event: FormEvent) {
     event.preventDefault(); const text = draft.trim(); if (!text || loading) return;
-    const next = [...messages, { role: "user" as const, content: text }]; setMessages(next); setDraft(""); setLoading(true); setError("");
-    try { const result: ChatResult = await sendChat(text, next); setMessages([...next, { role: "assistant", content: result.answer, trace: result.trace }]); if (result.safetyTriggered) setError("Mình ưu tiên an toàn của bạn. Hãy tìm một người thật để đồng hành ngay lúc này."); }
-    catch { const result = mockChat(text); setMessages([...next, { role: "assistant", content: result.answer, trace: result.trace }]); setError("Đang dùng chế độ demo offline."); }
+    const userMessage: Message = { id: `user-${Date.now()}`, role: "user", content: text };
+    const agentId = `agent-${Date.now()}`;
+    const agentMessage: Message = { id: agentId, role: "assistant", content: "", trace: [], streaming: true };
+    const conversation = [...messages, userMessage].map(({ role, content }) => ({ role, content }));
+    setMessages((current) => [...current, userMessage, agentMessage]); setDraft(""); setLoading(true); setError("");
+    const applyEvent = (streamEvent: StreamEvent) => {
+      setMessages((current) => current.map((message) => {
+        if (message.id !== agentId) return message;
+        if (streamEvent.kind === "stage") return { ...message, trace: [...(message.trace ?? []), `${streamEvent.type.toUpperCase()}: ${streamEvent.content}`] };
+        if (streamEvent.kind === "final_delta") return { ...message, content: message.content + streamEvent.content };
+        if (streamEvent.kind === "final_end") return { ...message, streaming: false };
+        return message;
+      }));
+      if (streamEvent.kind === "final_end" && streamEvent.safetyTriggered) setError("Mình ưu tiên an toàn của bạn. Hãy tìm một người thật để đồng hành ngay lúc này.");
+    };
+    try { await sendChatStream(text, conversation, applyEvent); }
+    catch {
+      const result = mockChat(text);
+      setMessages((current) => current.map((message) => message.id === agentId ? { ...message, content: result.answer, trace: result.trace, streaming: false } : message));
+      setError("Đang dùng chế độ demo offline.");
+    }
     setLoading(false);
   }
 
   return <main className="grain min-h-screen overflow-hidden">
     <nav className="mx-auto flex max-w-7xl items-center justify-between px-5 py-5 sm:px-8">
-      <button onClick={() => setScreen("home")} className="focus-ring rounded-xl" aria-label="Về trang chủ"><img src="/vinuni-demo-mark.svg" alt="VinUni Inner Compass" className="h-12 w-auto" /></button>
+      <button onClick={() => setScreen("home")} className="focus-ring rounded-xl" aria-label="Về trang chủ"><img src="public/vinuni-demo-mark.svg" alt="VinUni Inner Compass" className="h-12 w-auto" /></button>
       <div className="flex items-center gap-2"><span className="hidden rounded-full bg-white/70 px-3 py-2 text-xs font-semibold text-slate-500 sm:inline">PHIÊN TỰ PHẢN TƯ</span><button onClick={clearData} className="focus-ring rounded-full border border-slate-200 bg-white/75 p-2.5 text-slate-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600" title="Xóa dữ liệu phiên"><Trash2 size={16} /></button></div>
     </nav>
     <AnimatePresence mode="wait">

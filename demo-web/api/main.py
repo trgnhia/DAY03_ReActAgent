@@ -1,12 +1,15 @@
 """Isolated HTTP adapter for the existing Lab 3 agent; it never returns prompts."""
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -15,7 +18,16 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(ROOT, ".env"), override=False)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from app import CRISIS_RESPONSE, check_safety, run_react_agent  # noqa: E402
+from app import (  # noqa: E402
+    CRISIS_RESPONSE,
+    MAX_ITERATIONS,
+    build_react_prompt,
+    check_safety,
+    execute_tool,
+    is_provider_error,
+    parse_agent_output,
+    run_react_agent,
+)
 from providers import get_llm_provider  # noqa: E402
 from tools import get_wellbeing_exercise, get_psychological_archetype, score_personality_profile  # noqa: E402
 
@@ -52,6 +64,83 @@ def public_trace(trace: list[Any]) -> list[str]:
     return visible
 
 
+def sse(event: str, payload: dict[str, Any]) -> str:
+    """Encode one Server-Sent Event without exposing prompt/provider internals."""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def text_chunks(text: str, size: int = 12):
+    for index in range(0, len(text), size):
+        yield text[index : index + size]
+
+
+def stream_react(payload: ChatRequest):
+    """Streaming presentation adapter; ReAct policy/parser/tools remain from src/app.py."""
+    if check_safety(payload.message):
+        yield sse("stage", {"type": "guardrail", "content": "Safety Gate: phát hiện nội dung khủng hoảng; không gọi LLM hoặc tool."})
+        yield sse("final_start", {})
+        for chunk in text_chunks(CRISIS_RESPONSE):
+            yield sse("final_delta", {"content": chunk})
+            time.sleep(0.012)
+        yield sse("final_end", {"safetyTriggered": True})
+        return
+
+    provider = get_llm_provider()
+    transcript = f"Question: {payload.message}\n"
+    seen_actions: dict[tuple[str, tuple[str, ...]], int] = {}
+    final_answer: str | None = None
+    provider_failed = False
+
+    for step in range(1, MAX_ITERATIONS + 1):
+        yield sse("stage", {"type": "status", "step": step, "content": f"Bước {step}/{MAX_ITERATIONS}: đang gọi model…"})
+        raw = provider.generate(transcript, system_prompt=build_react_prompt())
+
+        if is_provider_error(raw):
+            provider_failed = True
+            yield sse("stage", {"type": "guardrail", "step": step, "content": "Provider không phản hồi hợp lệ; agent dừng an toàn."})
+            break
+
+        parsed = parse_agent_output(raw)
+        if parsed["thought"]:
+            yield sse("stage", {"type": "thought", "step": step, "content": parsed["thought"]})
+
+        if parsed["type"] == "final":
+            final_answer = parsed["answer"]
+            break
+
+        if parsed["type"] == "error":
+            observation = parsed["message"]
+            yield sse("stage", {"type": "guardrail", "step": step, "content": observation})
+            transcript += f"{raw.strip()}\nObservation: {observation}\n"
+            continue
+
+        tool, args = parsed["tool"], parsed["args"]
+        action = f"{tool}[{', '.join(args)}]"
+        yield sse("stage", {"type": "action", "step": step, "content": action})
+        key = (tool, tuple(args))
+        seen_actions[key] = seen_actions.get(key, 0) + 1
+        if seen_actions[key] > 1:
+            observation = f"LỖI LẶP: Action {action} đã được gọi; hãy đổi hướng hoặc trả lời dựa trên dữ liệu hiện có."
+        else:
+            observation = execute_tool(tool, args)
+        yield sse("stage", {"type": "observation", "step": step, "content": observation})
+        transcript += f"Thought: {parsed['thought']}\nAction: {action}\nObservation: {observation}\n"
+
+    if final_answer is None:
+        final_answer = (
+            "Hệ thống chưa kết nối được tới LLM Provider. Agent đã dừng an toàn, không bịa câu trả lời."
+            if provider_failed
+            else f"Agent đã đạt giới hạn {MAX_ITERATIONS} bước nhưng chưa có đủ dữ liệu đáng tin cậy để trả lời an toàn."
+        )
+        yield sse("stage", {"type": "guardrail", "content": "Safe fallback được kích hoạt."})
+
+    yield sse("final_start", {})
+    for chunk in text_chunks(final_answer):
+        yield sse("final_delta", {"content": chunk})
+        time.sleep(0.012)
+    yield sse("final_end", {"safetyTriggered": False})
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "inner-compass-demo"}
@@ -64,6 +153,15 @@ def chat(payload: ChatRequest) -> dict[str, Any]:
     trace: list[str] = []
     answer = run_react_agent(payload.message, get_llm_provider(), trace=trace)
     return {"answer": answer, "trace": public_trace(trace), "safetyTriggered": False}
+
+
+@app.post("/api/chat/stream")
+def chat_stream(payload: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        stream_react(payload),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/profile")

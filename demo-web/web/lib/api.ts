@@ -8,6 +8,12 @@ async function request<T>(path: string, body: unknown): Promise<T> {
 
 export type ProfileResult = { profile: string; archetype: string; disclaimer: string };
 export type ChatResult = { answer: string; trace: string[]; safetyTriggered: boolean };
+export type AgentStage = "status" | "thought" | "action" | "observation" | "guardrail";
+export type StreamEvent =
+  | { kind: "stage"; type: AgentStage; content: string; step?: number }
+  | { kind: "final_start" }
+  | { kind: "final_delta"; content: string }
+  | { kind: "final_end"; safetyTriggered: boolean };
 
 export async function scoreProfile(responses: number[]): Promise<ProfileResult> {
   return request<ProfileResult>("/api/profile", { responses });
@@ -15,6 +21,40 @@ export async function scoreProfile(responses: number[]): Promise<ProfileResult> 
 
 export async function sendChat(message: string, conversation: { role: string; content: string }[]): Promise<ChatResult> {
   return request<ChatResult>("/api/chat", { message, conversation });
+}
+
+export async function sendChatStream(
+  message: string,
+  conversation: { role: string; content: string }[],
+  onEvent: (event: StreamEvent) => void,
+): Promise<void> {
+  const response = await fetch(`${API_URL}/api/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({ message, conversation }),
+  });
+  if (!response.ok || !response.body) throw new Error(`Streaming API ${response.status}`);
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const eventName = frame.match(/^event: (.+)$/m)?.[1];
+      const rawData = frame.match(/^data: (.+)$/m)?.[1];
+      if (!eventName || !rawData) continue;
+      const data = JSON.parse(rawData) as Record<string, unknown>;
+      if (eventName === "stage") onEvent({ kind: "stage", type: data.type as AgentStage, content: String(data.content ?? ""), step: typeof data.step === "number" ? data.step : undefined });
+      if (eventName === "final_start") onEvent({ kind: "final_start" });
+      if (eventName === "final_delta") onEvent({ kind: "final_delta", content: String(data.content ?? "") });
+      if (eventName === "final_end") onEvent({ kind: "final_end", safetyTriggered: Boolean(data.safetyTriggered) });
+    }
+    if (done) break;
+  }
 }
 
 export async function getExercise(emotionalState: string, intensity: number): Promise<{ exercise: string; disclaimer: string }> {
