@@ -76,7 +76,7 @@ Observation: 🧘 BÀI TẬP XOA DỊU CĂNG THẲNG (Trạng thái: 'căng th�
              không thay thế cho tư vấn hoặc điều trị y khoa chuyên khoa.
 
 Final Answer:
-- Phân tích điểm số hồ sơ tính cách:
+- Phân tích điểm số hồ sơ tính cách::
   - Openness (Cởi mở): 5.0/5.0
   - Conscientiousness (Tận tụy/Cầu toàn): 4.0/5.0
   - Extraversion (Hướng ngoại): 2.0/5.0
