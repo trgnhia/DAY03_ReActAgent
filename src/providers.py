@@ -132,11 +132,26 @@ class OpenRouterProvider(BaseLLMProvider):
 
 
 class MockProvider(BaseLLMProvider):
-    """Offline Mock Provider (Cho bài test không cần kết nối API)"""
+    """
+    Offline Mock Provider — chạy được khi chưa có API key.
+
+    Provider này cố tình sinh LẶP LẠI cùng một Action ở mọi lượt. Nó đóng vai một
+    "agent bị kẹt vòng lặp" để kiểm thử hai lớp phanh của hệ thống một cách tất
+    định, không phụ thuộc may rủi của LLM thật:
+
+        Step 1  ➔ Action chạy bình thường, nhận Observation thật
+        Step 2+ ➔ Repeated-Action Guard bắt được
+        Cuối    ➔ Chạm MAX_ITERATIONS, rơi vào Safe Fallback
+
+    Lệnh tái lập bằng chứng: LLM_PROVIDER=mock python src/app.py --case 3
+    """
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         text = prompt.lower()
-        if "thời tiết" in text and "hà nội" in text:
-            return "Thought: Cần tra cứu thời tiết Hà Nội.\nAction: get_weather['Hà Nội']"
+        if "tự đánh giá" in text or "[5, 4, 2" in text:
+            return (
+                "Thought: Tôi cần chấm điểm bộ đáp án tự đánh giá của người dùng.\n"
+                "Action: score_personality_profile[[5, 4, 2, 4, 3, 5, 4, 2, 4, 3]]"
+            )
         return "🤖 [Mock Provider]: Phản hồi giả lập offline cho bài test."
 
 

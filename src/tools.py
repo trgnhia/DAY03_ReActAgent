@@ -8,6 +8,41 @@ import json
 import re
 from typing import Union, List
 
+# Dùng chung nguồn hotline duy nhất do Role 3 quản lý, tránh mỗi file ghi một số.
+from prompts import CRISIS_HOTLINES
+
+# Bảng quy đổi mức độ mô tả bằng chữ sang thang số 1-10.
+_INTENSITY_WORDS = {
+    "rất nhẹ": 2, "nhẹ": 3, "thấp": 3,
+    "trung bình": 5, "vừa": 5, "vừa phải": 5,
+    "cao": 8, "nặng": 8, "mạnh": 8, "rất cao": 9, "dữ dội": 9,
+}
+
+
+def _parse_intensity(raw: Union[int, str]):
+    """
+    Quy đổi mức độ cảm xúc về số nguyên 1-10.
+
+    Chấp nhận: 7 · "7" · "7/10" · "vừa" · "cao"
+    Trả về None nếu không hiểu được — hàm gọi PHẢI báo lỗi thay vì đoán bừa.
+    """
+    if isinstance(raw, (int, float)):
+        val = int(raw)
+        return val if 1 <= val <= 10 else None
+
+    text = str(raw).strip().lower()
+
+    match = re.search(r"\d+", text)          # "7", "7/10", "mức 7"
+    if match:
+        val = int(match.group(0))
+        return val if 1 <= val <= 10 else None
+
+    for word, val in _INTENSITY_WORDS.items():
+        if word in text:
+            return val
+
+    return None
+
 
 def score_personality_profile(responses: Union[List[int], str]) -> str:
     """
@@ -33,6 +68,14 @@ def score_personality_profile(responses: Union[List[int], str]) -> str:
             return "LỖI: Đầu vào phải là danh sách ít nhất 5 đến 10 điểm số tự đánh giá (thang 1-5)."
 
         nums = [float(x) for x in responses]
+
+        # Chặn dữ liệu ngoài thang đo thay vì tính ra một hồ sơ tính cách vô nghĩa.
+        invalid = [n for n in nums if not (1 <= n <= 5)]
+        if invalid:
+            return (
+                f"LỖI: Bộ đáp án chứa giá trị ngoài thang 1-5: {invalid}. "
+                "Vui lòng kiểm tra lại bài tự đánh giá."
+            )
 
         if len(nums) == 10:
             openness = round((nums[0] + nums[5]) / 2.0, 1)
@@ -76,16 +119,21 @@ def get_wellbeing_exercise(emotional_state: str, intensity: Union[int, str] = 5)
     
     Args:
         emotional_state (str): Trạng thái cảm xúc (ví dụ: 'căng thẳng', 'lo âu', 'buồn bã', 'mệt mỏi', 'giận dữ').
-        intensity (Union[int, str]): Mức độ cảm xúc trên thang điểm 1-10 (ví dụ: 7).
-        
+        intensity (Union[int, str]): Mức độ cảm xúc, SỐ NGUYÊN thang 1-10 (ví dụ: 7).
+
     Returns:
         str: Bài tập thực hành chi tiết (kỹ thuật thở, grounding, journaling) và lưu ý phi lâm sàng.
     """
     try:
-        try:
-            val_intensity = int(intensity)
-        except (ValueError, TypeError):
-            val_intensity = 5
+        # Trước đây hàm này âm thầm lấy 5 khi không parse được intensity, khiến
+        # Observation trả về "5/10" trong khi người dùng nói 7/10 — Agent đọc phải
+        # dữ liệu sai mà không hề biết. Giờ parse fail thì báo lỗi thẳng.
+        val_intensity = _parse_intensity(intensity)
+        if val_intensity is None:
+            return (
+                f"LỖI: Không đọc được mức độ '{intensity}'. Tham số intensity phải là "
+                f"số nguyên từ 1 đến 10 (ví dụ: 7), hoặc mô tả như 'nhẹ' / 'vừa' / 'cao'."
+            )
 
         state_clean = str(emotional_state).lower()
 
@@ -177,10 +225,9 @@ def search_mental_health_resources(topic: str) -> str:
     if any(w in t for w in ["tự sát", "tự hại", "muốn chết", "khủng hoảng", "hotline", "khẩn cấp"]):
         return (
             "🆘 TÀI NGUYÊN HỖ TRỢ TÂM LÝ KHẨN CẤP:\n"
-            "- Hotline Ngày Mới (Hỗ trợ tâm lý & Khủng hoảng): 0963 061 414\n"
-            "- Tổng đài Quốc gia Bảo vệ Trẻ em & Tâm lý: 111\n"
-            "- Viện Sức khỏe Tâm thần - Bệnh viện Bạch Mai: (024) 3576 5344\n"
-            "💡 Lời nhắn: Bạn không một mình. Hãy liên hệ ngay với chuyên gia hoặc người thân đáng tin cậy để được hỗ trợ kịp thời!"
+            f"{CRISIS_HOTLINES}\n"
+            "💡 Lời nhắn: Bạn không một mình. Hãy liên hệ ngay với chuyên gia hoặc "
+            "người thân đáng tin cậy để được hỗ trợ kịp thời!"
         )
     else:
         return (

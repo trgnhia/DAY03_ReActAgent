@@ -28,6 +28,7 @@ import datetime
 import inspect
 import json
 import os
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -74,6 +75,43 @@ DEFAULT_CRISIS_RESPONSE = (
 
 CRISIS_KEYWORDS = getattr(prompts, "CRISIS_KEYWORDS", DEFAULT_CRISIS_KEYWORDS)
 CRISIS_RESPONSE = getattr(prompts, "CRISIS_RESPONSE", DEFAULT_CRISIS_RESPONSE)
+NON_DIAGNOSTIC_NOTICE = getattr(
+    prompts, "NON_DIAGNOSTIC_NOTICE",
+    "⚠️ Đây là thông tin tham khảo để tự khám phá bản thân, "
+    "không phải chẩn đoán y khoa hay tâm lý.",
+)
+
+# =============================================================================
+# 🔀 HYBRID ROUTER CONFIG — chỉnh 2 danh sách này khi nhóm đổi đề tài
+# =============================================================================
+
+# Dấu hiệu câu hỏi KHÁI NIỆM ➔ Chatbot trả lời là đủ, gọi tool chỉ tốn tiền.
+CHATBOT_SIGNALS = [
+    "là gì", "nghĩa là", "hiểu như thế nào", "hiểu thế nào", "khái niệm",
+    "giải thích", "phân biệt", "khác nhau", "tại sao", "vì sao",
+    "nêu", "liệt kê", "cho ví dụ", "định nghĩa", "có nên",
+]
+
+# Dấu hiệu cần DỮ LIỆU/HÀNH ĐỘNG THẬT ➔ bắt buộc đi ReAct Agent để có evidence.
+AGENT_SIGNALS = [
+    "bài tự đánh giá", "đáp án", "điểm số", "hồ sơ tính cách", "trắc nghiệm",
+    "phân tích xu hướng", "phân tích giúp", "chấm điểm",
+    "bài tập", "xoa dịu", "thư giãn", "hít thở",
+    "khai quật", "nhân cách thứ 2", "nhân cách thứ hai", "tiềm thức",
+    "hotline", "tài nguyên", "chuyên gia", "đặt lịch", "lịch hẹn", "lịch trống",
+]
+
+# Dữ liệu có cấu trúc (bộ đáp án [5, 4, 2...], thang điểm 7/10) ➔ chắc chắn cần tool.
+STRUCTURED_DATA_RE = re.compile(r"\[\s*\d+(?:\s*,\s*\d+)+\s*\]|\b\d+\s*/\s*(?:5|10)\b")
+
+ROUTER_CLASSIFIER_PROMPT = """Bạn là bộ phân loại câu hỏi. Chỉ trả lời DUY NHẤT một từ.
+
+Trả lời "AGENT" nếu câu hỏi cần tra cứu dữ liệu thật, chấm điểm, tính toán,
+tra lịch hẹn, hoặc xử lý dữ liệu cá nhân mà người dùng cung cấp.
+Trả lời "CHATBOT" nếu câu hỏi chỉ cần giải thích khái niệm, đưa lời khuyên
+chung chung, hoặc trò chuyện thông thường.
+
+Chỉ in ra đúng một từ: AGENT hoặc CHATBOT."""
 
 
 # =============================================================================
@@ -124,17 +162,34 @@ def build_react_prompt() -> str:
 # =============================================================================
 
 def _split_args(raw: str):
-    """Tách chuỗi tham số, tôn trọng dấu nháy: `'A', "B"` ➔ ['A', 'B']."""
-    args, buf, quote = [], "", None
+    """
+    Tách chuỗi tham số thành list, tôn trọng dấu nháy VÀ ngoặc lồng nhau.
+
+        'A', "B"              ➔ ['A', 'B']
+        [5, 4, 2], "căng thẳng" ➔ ['[5, 4, 2]', 'căng thẳng']
+
+    Chỉ cắt tại dấu phẩy ở ĐỘ SÂU 0, nếu không một tham số dạng danh sách
+    (VD: bộ đáp án trắc nghiệm) sẽ bị xé thành nhiều tham số rời.
+    """
+    args, buf, quote, depth = [], "", None, 0
     for ch in raw:
         if quote:
+            buf += ch
             if ch == quote:
                 quote = None
-            else:
-                buf += ch
+                if depth == 0:
+                    buf = buf[:-1]          # bỏ nháy đóng khi ở ngoài cùng
         elif ch in "\"'":
             quote = ch
-        elif ch == ",":
+            if depth > 0:
+                buf += ch                   # giữ nguyên nháy bên trong list/JSON
+        elif ch in "[{(":
+            depth += 1
+            buf += ch
+        elif ch in "]})":
+            depth -= 1
+            buf += ch
+        elif ch == "," and depth == 0:
             args.append(buf.strip())
             buf = ""
         else:
@@ -227,6 +282,15 @@ def execute_tool(tool_name: str, args: list) -> str:
     fn = AVAILABLE_TOOLS[tool_name]
     expected = list(inspect.signature(fn).parameters.keys())
 
+    # Parser linh hoạt: LLM rất hay quên cặp ngoặc trong của tham số dạng danh sách,
+    # sinh ra score_personality_profile[5, 4, 2] thay vì [[5, 4, 2]]. Nếu tool chỉ
+    # nhận 1 tham số mà ta lại nhận về toàn số, gộp chúng lại thành một danh sách
+    # thay vì bắt agent tốn thêm một vòng lặp chỉ để sửa dấu ngoặc.
+    if len(expected) == 1 and len(args) > 1 and all(
+        re.fullmatch(r"-?\d+(?:\.\d+)?", a) for a in args
+    ):
+        args = ["[" + ", ".join(args) + "]"]
+
     if len(args) != len(expected):
         return (
             f"LỖI: Tool '{tool_name}' cần đúng {len(expected)} tham số "
@@ -252,8 +316,76 @@ def check_safety(user_query: str) -> bool:
     return any(kw in text for kw in CRISIS_KEYWORDS)
 
 
+def ensure_disclaimer(answer: str) -> str:
+    """
+    🛡️ Chốt chặn phi chẩn đoán.
+
+    REACT_SYSTEM_PROMPT và CHATBOT_BASELINE_PROMPT đều đã yêu cầu LLM tự kèm câu
+    tuyên bố này, nhưng đo thực tế cho thấy nó bỏ quên khoảng 1/5 số lượt. Với đề
+    tài tâm lý, một ràng buộc đạo đức không được phép phụ thuộc vào việc model có
+    chịu nghe hay không — nên ta chèn cứng ở tầng ứng dụng.
+    """
+    if not answer or "chẩn đoán" in answer.lower():
+        return answer
+    return f"{answer}\n\n{NON_DIAGNOSTIC_NOTICE}"
+
+
 # =============================================================================
-# 4. HAI CHẾ ĐỘ CHẠY: CHATBOT BASELINE & REACT AGENT
+# 4. HYBRID ROUTER — Quyết định đi đường Chatbot hay đường ReAct Agent
+# =============================================================================
+
+def route_query(user_query: str, provider=None) -> tuple:
+    """
+    Phân luồng câu hỏi qua 3 tầng, rẻ trước — đắt sau.
+
+        Tầng 1 (luật cứng)  : dấu hiệu khủng hoảng      ➔ safety_guardrail
+        Tầng 2 (luật xác định): dữ liệu có cấu trúc / câu hỏi khái niệm /
+                                từ khóa nghiệp vụ       ➔ react_agent | chatbot
+        Tầng 3 (LLM 1 call) : chỉ chạy khi Tầng 2 không kết luận được
+
+    Trả về: (route, lý_do, tầng_đã_quyết_định)
+    """
+    text = user_query.lower()
+
+    # --- TẦNG 1: An toàn luôn được ưu tiên tuyệt đối ---
+    if check_safety(user_query):
+        return ("safety_guardrail", "Phát hiện từ khóa nguy cơ tự hại", "Tầng 1 - Luật an toàn")
+
+    # --- TẦNG 2a: Có dữ liệu cá nhân dạng số ➔ chắc chắn phải gọi tool ---
+    match = STRUCTURED_DATA_RE.search(user_query)
+    if match:
+        return ("react_agent",
+                f"Có dữ liệu cấu trúc cần xử lý: '{match.group(0)}'",
+                "Tầng 2 - Luật xác định")
+
+    # --- TẦNG 2b: Câu hỏi khái niệm ➔ Chatbot là đủ (ưu tiên hơn 2c) ---
+    # Cố ý xét TRƯỚC 2c: "Khái niệm nhân cách thứ hai là gì?" tuy chứa danh từ
+    # nghiệp vụ nhưng chỉ đang hỏi định nghĩa, gọi tool là lãng phí.
+    hit = next((s for s in CHATBOT_SIGNALS if s in text), None)
+    if hit:
+        return ("chatbot",
+                f"Câu hỏi khái niệm (dấu hiệu: '{hit}'), không cần evidence từ tool",
+                "Tầng 2 - Luật xác định")
+
+    # --- TẦNG 2c: Từ khóa nghiệp vụ khớp năng lực tool ---
+    hit = next((s for s in AGENT_SIGNALS if s in text), None)
+    if hit:
+        return ("react_agent",
+                f"Khớp từ khóa nghiệp vụ cần tool: '{hit}'",
+                "Tầng 2 - Luật xác định")
+
+    # --- TẦNG 3: Mơ hồ ➔ nhờ LLM phân loại (tốn đúng 1 call) ---
+    if provider is not None:
+        verdict = provider.generate(user_query, system_prompt=ROUTER_CLASSIFIER_PROMPT)
+        if not is_provider_error(verdict) and "agent" in (verdict or "").strip().lower():
+            return ("react_agent", "LLM classifier phân loại là AGENT", "Tầng 3 - LLM")
+        return ("chatbot", "LLM classifier phân loại là CHATBOT", "Tầng 3 - LLM")
+
+    return ("chatbot", "Không có tín hiệu rõ ràng, mặc định an toàn về Chatbot", "Mặc định")
+
+
+# =============================================================================
+# 5. HAI CHẾ ĐỘ CHẠY: CHATBOT BASELINE & REACT AGENT
 # =============================================================================
 
 def run_baseline_chatbot(user_query: str, provider, trace: list = None) -> str:
@@ -263,6 +395,8 @@ def run_baseline_chatbot(user_query: str, provider, trace: list = None) -> str:
     """
     print(f"\n💬 [CHATBOT BASELINE] Câu hỏi: {user_query}")
     response = provider.generate(user_query, system_prompt=CHATBOT_BASELINE_PROMPT)
+    if not is_provider_error(response):
+        response = ensure_disclaimer(response)
     print(f"🤖 Trả lời (0 tool call):\n{response}")
 
     if trace is not None:
@@ -315,7 +449,7 @@ def run_react_agent(user_query: str, provider, trace: list = None) -> str:
 
         # --- Trường hợp A: Agent chốt câu trả lời cuối ---
         if parsed["type"] == "final":
-            final_answer = parsed["answer"]
+            final_answer = ensure_disclaimer(parsed["answer"])
             print(f"🏁 Final Answer: {final_answer}")
             log.append(f"Final Answer: {final_answer}")
             break
@@ -378,8 +512,31 @@ def run_react_agent(user_query: str, provider, trace: list = None) -> str:
     return final_answer
 
 
+def run_hybrid(user_query: str, provider, trace: list = None) -> tuple:
+    """
+    🔀 Sản phẩm hoàn chỉnh: Router quyết định đường đi, rồi mới chạy nhánh tương ứng.
+
+    Trả về: (route_đã_chọn, câu_trả_lời)
+    """
+    route, reason, layer = route_query(user_query, provider)
+    print(f"\n🔀 ROUTER [{layer}] ➔ {route.upper()}")
+    print(f"   ↳ Lý do: {reason}")
+
+    if trace is not None:
+        trace.append(f"**🔀 Router:** `{route}` — {reason} *({layer})*\n")
+
+    if route == "chatbot":
+        answer = run_baseline_chatbot(user_query, provider, trace)
+    else:
+        # Cả react_agent lẫn safety_guardrail đều đi vào đây; Safety Gate bên
+        # trong run_react_agent sẽ tự chặn trước khi tốn bất kỳ token nào.
+        answer = run_react_agent(user_query, provider, trace)
+
+    return route, answer
+
+
 # =============================================================================
-# 5. GHI TRACE LOG CHO ROLE 5
+# 6. GHI TRACE LOG CHO ROLE 5
 # =============================================================================
 
 def save_trace(trace: list, provider_label: str) -> str:
@@ -414,15 +571,43 @@ def interactive_chat(provider):
             print("👋 Kết thúc phiên hội thoại.")
             return
         if query:
-            run_react_agent(query, provider)
+            run_hybrid(query, provider)
+
+
+def report_routing(results: list, trace: list):
+    """In bảng chấm độ chính xác của Router so với expected_route của Role 1."""
+    if not results:
+        return
+    print("\n" + "=" * 62)
+    print("🔀 BÁO CÁO ĐỘ CHÍNH XÁC CỦA HYBRID ROUTER")
+    print("=" * 62)
+
+    rows = ["| Case | Câu hỏi | Kỳ vọng | Router chọn | Kết quả |",
+            "| :---: | :--- | :--- | :--- | :---: |"]
+    correct = 0
+    for cid, question, expected, actual in results:
+        ok = (expected == actual)
+        correct += ok
+        mark = "✅" if ok else "❌"
+        print(f"{mark} Case #{cid}: kỳ vọng={expected:<17} router chọn={actual}")
+        short_q = (question[:45] + "…") if len(question) > 45 else question
+        rows.append(f"| #{cid} | {short_q} | `{expected}` | `{actual}` | {mark} |")
+
+    total = len(results)
+    print(f"\n🎯 ĐỘ CHÍNH XÁC PHÂN LUỒNG: {correct}/{total} "
+          f"({correct * 100 // total}%)")
+    trace.append("## 🔀 Độ chính xác Hybrid Router\n\n" + "\n".join(rows) +
+                 f"\n\n**Tổng: {correct}/{total} câu định tuyến đúng.**\n\n---\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Lab 3 — Chatbot vs ReAct Agent")
     parser.add_argument("--case", type=int, default=None,
                         help="Chỉ chạy 1 test case theo id (VD: --case 3)")
-    parser.add_argument("--mode", choices=["both", "chatbot", "agent"], default="both",
-                        help="Chạy chatbot baseline, react agent, hoặc cả hai")
+    parser.add_argument("--mode", choices=["hybrid", "both", "chatbot", "agent"],
+                        default="hybrid",
+                        help="hybrid = sản phẩm hoàn chỉnh có Router (mặc định); "
+                             "both = chạy song song 2 nhánh để so sánh cho báo cáo")
     parser.add_argument("--chat", action="store_true",
                         help="Bật chế độ hội thoại trực tiếp thay vì chạy test case")
     args = parser.parse_args()
@@ -454,6 +639,7 @@ def main():
             return
 
     trace = []
+    routing_results = []
     for tc in tests:
         question = tc["question"]
         print("\n" + "=" * 62)
@@ -465,13 +651,20 @@ def main():
         trace.append(f"## 🧪 Test Case #{tc.get('id')} — {tc.get('category', '')}\n"
                      f"**Kỳ vọng:** {tc.get('expected_behavior', 'N/A')}\n")
 
-        if args.mode in ("both", "chatbot"):
-            run_baseline_chatbot(question, provider, trace)
-        if args.mode in ("both", "agent"):
-            run_react_agent(question, provider, trace)
+        if args.mode == "hybrid":
+            route, _ = run_hybrid(question, provider, trace)
+            expected = tc.get("expected_route")
+            if expected:
+                routing_results.append((tc.get("id"), question, expected, route))
+        else:
+            if args.mode in ("both", "chatbot"):
+                run_baseline_chatbot(question, provider, trace)
+            if args.mode in ("both", "agent"):
+                run_react_agent(question, provider, trace)
 
         trace.append("\n---\n")
 
+    report_routing(routing_results, trace)
     path = save_trace(trace, provider_label)
     print(f"\n📄 Đã lưu trace log cho Role 5 tại: {os.path.relpath(path, BASE_DIR)}")
 
