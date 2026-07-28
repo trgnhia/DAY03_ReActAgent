@@ -1,9 +1,0 @@
-web/node_modules/
-web/.next/
-web/out/
-web/.env*
-web/.env.example
-api/.venv/
-api/__pycache__/
-*.pyc
-*.log
