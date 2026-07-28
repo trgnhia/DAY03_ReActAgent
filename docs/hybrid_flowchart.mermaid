@@ -1,0 +1,66 @@
+%% =============================================================================
+%% 🔀 HYBRID DECISION FLOWCHART — Khi nào đi Chatbot, khi nào đi ReAct Agent
+%% Đề tài: Trợ Lý Khai Quật Nhân Cách Thứ 2 & Tư Vấn Tâm Lý
+%% Sơ đồ này mô tả ĐÚNG hàm route_query() đang chạy trong src/app.py
+%% Kết quả đo thực tế: 5/5 test case định tuyến đúng, chỉ 2/5 câu phải gọi LLM
+%% =============================================================================
+
+flowchart TD
+    U["👤 Câu hỏi người dùng"] --> T1
+
+    subgraph L1["🛡️ TẦNG 1 — Luật an toàn (0 token, chạy trước mọi thứ)"]
+        T1{"Có từ khóa nguy cơ<br/>tự hại / tự tử?"}
+    end
+
+    T1 -->|"Có"| SAFE["🆘 SAFETY GUARDRAIL<br/>Trả lời cảm thông + hotline<br/>KHÔNG gọi LLM, KHÔNG gọi tool"]
+
+    T1 -->|"Không"| T2A
+
+    subgraph L2["⚡ TẦNG 2 — Luật xác định (0 token, quyết định 5/5 test case)"]
+        direction TB
+        T2A{"Có dữ liệu cấu trúc?<br/>VD: [5,4,2,...] hoặc 7/10"}
+        T2B{"Là câu hỏi khái niệm?<br/>'là gì', 'nêu', 'giải thích'"}
+        T2C{"Khớp từ khóa nghiệp vụ?<br/>'bài tập', 'đặt lịch', 'hotline'"}
+
+        T2A -->|"Không"| T2B
+        T2B -->|"Không"| T2C
+    end
+
+    T2A -->|"Có"| AGENT
+    T2B -->|"Có"| CHAT
+    T2C -->|"Có"| AGENT
+    T2C -->|"Không"| T3
+
+    subgraph L3["🤖 TẦNG 3 — LLM Classifier (tốn 1 call, chỉ khi mơ hồ)"]
+        T3{"Hỏi LLM:<br/>AGENT hay CHATBOT?"}
+    end
+
+    T3 -->|"CHATBOT"| CHAT
+    T3 -->|"AGENT"| AGENT
+
+    CHAT["💬 CHATBOT PATH<br/>1 LLM call · 0 tool call<br/>Rẻ &amp; nhanh"]
+    AGENT["🧠 REACT AGENT PATH<br/>Thought ➔ Action ➔ Observation<br/>Có evidence thật từ tool"]
+
+    CHAT --> OUT["🏁 Câu trả lời"]
+
+    AGENT --> LOOP{"Vòng lặp ReAct<br/>step &lt; MAX_ITERATIONS?"}
+    LOOP -->|"Còn budget"| EXEC["🛠️ Thực thi tool thật<br/>➔ Observation nối lại vào prompt"]
+    EXEC --> REPEAT{"🛡️ Gọi lặp<br/>y hệt lần trước?"}
+    REPEAT -->|"Có"| WARN["⚠️ Ép agent đổi hướng"]
+    REPEAT -->|"Không"| LOOP
+    WARN --> LOOP
+    LOOP -->|"Đã có Final Answer"| OUT
+    LOOP -->|"🛡️ Hết budget"| FALL["🛡️ SAFE FALLBACK<br/>Xin lỗi lịch sự, không bịa"]
+
+    SAFE --> OUT
+    FALL --> OUT
+
+    classDef safety fill:#ffe0e0,stroke:#c62828,stroke-width:2px,color:#000
+    classDef chatbot fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef agent fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    classDef guard fill:#fff8e1,stroke:#f9a825,stroke-width:2px,color:#000
+
+    class SAFE,T1 safety
+    class CHAT chatbot
+    class AGENT,EXEC agent
+    class FALL,WARN,REPEAT guard
